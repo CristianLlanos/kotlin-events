@@ -4,25 +4,15 @@ A lightweight event bus for Kotlin. Type-safe publish-subscribe with dependency-
 
 ## Installation
 
-Add the GitHub Packages repository and dependency to your `build.gradle.kts`:
+Add the dependency to your `build.gradle.kts`:
 
 ```kotlin
-repositories {
-    mavenCentral()
-    maven {
-        url = uri("https://maven.pkg.github.com/CristianLlanos/kotlin-events")
-        credentials {
-            username = project.findProperty("gpr.user") as String? ?: System.getenv("GITHUB_USERNAME")
-            password = project.findProperty("gpr.key") as String? ?: System.getenv("GITHUB_TOKEN")
-        }
-    }
-}
-
 dependencies {
     implementation("com.cristianllanos:events:0.1.0")
-    implementation("com.cristianllanos:container:0.1.0")
 }
 ```
+
+This pulls in [`kotlin-container`](https://github.com/CristianLlanos/kotlin-container) automatically as a transitive dependency.
 
 ## Quick start
 

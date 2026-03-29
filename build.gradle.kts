@@ -14,7 +14,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.cristianllanos:container:0.3.0")
+    implementation("com.cristianllanos:container:0.3.1")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.25")
 }
 

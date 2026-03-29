@@ -2,6 +2,7 @@ plugins {
     kotlin("jvm") version "1.9.25"
     signing
     id("com.vanniktech.maven.publish") version "0.30.0"
+    id("org.jetbrains.dokka") version "1.9.20"
 }
 
 group = "com.cristianllanos"

@@ -8,7 +8,7 @@ Add the dependency to your `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.cristianllanos:events:0.2.0")
+    implementation("com.cristianllanos:events:0.2.1")
 }
 ```
 

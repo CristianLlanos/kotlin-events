@@ -2,7 +2,6 @@ package com.cristianllanos.events
 
 import com.cristianllanos.container.Container
 import com.cristianllanos.container.singleton
-import com.cristianllanos.container.resolve
 import org.junit.Test
 import kotlin.test.assertEquals
 
@@ -11,11 +10,10 @@ class EventBusTest {
     @Test
     fun `full flow with real container auto-resolution`() {
         val container = Container()
-        val bus = EventBus(container)
-
         val listener = UserCreatedListener()
         container.singleton<UserCreatedListener> { listener }
 
+        val bus = EventBus(container)
         bus.subscribe<UserCreated, UserCreatedListener>()
         bus.emit(UserCreated("Alice"))
 

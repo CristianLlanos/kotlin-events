@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.cristianllanos"
-version = "0.1.0"
+version = "0.2.0"
 
 repositories {
     mavenLocal()
@@ -13,7 +13,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.cristianllanos:container:0.2.0")
+    implementation("com.cristianllanos:container:0.3.0")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:1.9.25")
 }
 

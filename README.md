@@ -8,7 +8,7 @@ Add the dependency to your `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.cristianllanos:events:0.1.0")
+    implementation("com.cristianllanos:events:0.2.0")
 }
 ```
 
@@ -79,12 +79,12 @@ val container = Container()
 container.register(EventServiceProvider())
 ```
 
-Then wire your event subscriptions in your own service providers:
+Then wire your event subscriptions in your own service providers. The `register` method's parameters are auto-resolved from the container:
 
 ```kotlin
-class OrderServiceProvider : ServiceProvider {
-    override fun register(container: Container) {
-        container.resolve<Subscriber>().subscribe<OrderPlaced>(
+class OrderEventProvider {
+    fun register(subscriber: Subscriber) {
+        subscriber.subscribe<OrderPlaced>(
             InventoryListener::class,
             NotificationListener::class,
         )

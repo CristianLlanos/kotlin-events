@@ -13,6 +13,9 @@ interface EventBus : Emitter, Subscriber, Inspector
 /**
  * Creates an [EventBus] instance that resolves listeners from the given [resolver].
  *
+ * The returned bus is thread-safe: [Subscriber.subscribe], [Subscriber.unsubscribe],
+ * [Emitter.emit], and [Subscriber.clear] can be called concurrently from different threads.
+ *
  * Listeners are instantiated on each [Emitter.emit] call, enabling constructor injection.
  * When a listener throws, remaining listeners still execute. Errors are collected and
  * passed to [onError] — by default, the exception is rethrown (single errors unwrapped,

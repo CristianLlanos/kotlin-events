@@ -1,6 +1,7 @@
 package com.cristianllanos.events
 
 import com.cristianllanos.container.Resolver
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.reflect.KClass
 
 internal class EventDispatcher(
@@ -8,26 +9,32 @@ internal class EventDispatcher(
     private val onError: (Throwable) -> Unit = { throw it },
 ) : EventBus {
 
+    private val lock = Any()
     private val classListeners = mutableMapOf<Class<out Event>, LinkedHashSet<Class<*>>>()
     private val lambdaListeners = mutableMapOf<Class<out Event>, MutableList<LambdaEntry<*>>>()
     private val globalListeners = mutableListOf<(Event) -> Unit>()
     private val middlewares = mutableListOf<Middleware>()
+    private var cachedChain: ((Event) -> Unit)? = null
 
     // -- Subscriber: class-based registration --
 
     override fun <E : Event, L : Listener<E>> subscribe(event: Class<E>, listener: Class<L>): Subscriber {
-        classListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        synchronized(lock) {
+            classListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        }
         return this
     }
 
     override fun <E : Event> subscribe(event: Class<E>, vararg listeners: KClass<out Listener<E>>): Subscriber {
-        val set = classListeners.computeIfAbsent(event) { linkedSetOf() }
-        listeners.forEach { set.add(it.java) }
+        synchronized(lock) {
+            val set = classListeners.computeIfAbsent(event) { linkedSetOf() }
+            listeners.forEach { set.add(it.java) }
+        }
         return this
     }
 
     override fun <E : Event, L : Listener<E>> unsubscribe(event: Class<E>, listener: Class<L>): Subscriber {
-        classListeners[event]?.remove(listener)
+        synchronized(lock) { classListeners[event]?.remove(listener) }
         return this
     }
 
@@ -35,8 +42,12 @@ internal class EventDispatcher(
 
     override fun <E : Event> on(event: Class<E>, handler: (E) -> Unit): Subscription {
         val entry = LambdaEntry(handler)
-        lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
-        return Subscription { lambdaListeners[event]?.remove(entry) }
+        synchronized(lock) {
+            lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
+        }
+        return Subscription {
+            synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+        }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -49,24 +60,38 @@ internal class EventDispatcher(
     }
 
     override fun <E : Event> once(event: Class<E>, handler: (E) -> Unit): Subscription {
+        val fired = AtomicBoolean(false)
         lateinit var entry: LambdaEntry<E>
         entry = LambdaEntry { e ->
-            lambdaListeners[event]?.remove(entry)
-            handler(e)
+            if (fired.compareAndSet(false, true)) {
+                synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+                handler(e)
+            }
         }
-        lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
-        return Subscription { lambdaListeners[event]?.remove(entry) }
+        synchronized(lock) {
+            lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
+        }
+        return Subscription {
+            if (fired.compareAndSet(false, true)) {
+                synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+            }
+        }
     }
 
     override fun onAny(handler: (Event) -> Unit): Subscription {
-        globalListeners.add(handler)
-        return Subscription { globalListeners.remove(handler) }
+        synchronized(lock) { globalListeners.add(handler) }
+        return Subscription {
+            synchronized(lock) { globalListeners.remove(handler) }
+        }
     }
 
     // -- Subscriber: middleware & DSL --
 
     override fun use(middleware: Middleware): Subscriber {
-        middlewares.add(middleware)
+        synchronized(lock) {
+            middlewares.add(middleware)
+            cachedChain = null
+        }
         return this
     }
 
@@ -76,15 +101,21 @@ internal class EventDispatcher(
     }
 
     override fun clear() {
-        classListeners.clear()
-        lambdaListeners.clear()
-        globalListeners.clear()
+        synchronized(lock) {
+            classListeners.clear()
+            lambdaListeners.clear()
+            globalListeners.clear()
+            middlewares.clear()
+            cachedChain = null
+        }
     }
 
     // -- Emitter --
 
     override fun <T : Event> emit(event: T) {
-        val chain = buildChain(middlewares) { e -> dispatchDirect(e) }
+        val chain = synchronized(lock) {
+            cachedChain ?: buildChain(middlewares) { e -> dispatchDirect(e) }.also { cachedChain = it }
+        }
         chain(event)
     }
 
@@ -93,90 +124,67 @@ internal class EventDispatcher(
         rest.forEach { emit(it) }
     }
 
-    // -- Inspector (walks hierarchy for consistency with emit) --
+    // -- Inspector --
 
-    override fun <E : Event> hasListeners(event: Class<E>): Boolean {
+    override fun <E : Event> hasListeners(event: Class<E>): Boolean = synchronized(lock) {
         if (globalListeners.isNotEmpty()) return true
-        val classEntries = collectEntries(classListeners, event)
-        if (classEntries.isNotEmpty()) return true
-        val lambdaEntries = collectEntries(lambdaListeners, event)
-        return lambdaEntries.isNotEmpty()
+        if (collectEntries(classListeners, event).isNotEmpty()) return true
+        if (collectEntries(lambdaListeners, event).isNotEmpty()) return true
+        return false
     }
 
-    override fun <E : Event> listenerCount(event: Class<E>): Int {
+    override fun <E : Event> listenerCount(event: Class<E>): Int = synchronized(lock) {
         val classCount = collectEntries(classListeners, event).size
         val lambdaCount = collectEntries(lambdaListeners, event).size
-        return classCount + lambdaCount + globalListeners.size
+        classCount + lambdaCount + globalListeners.size
     }
 
     // -- Internal dispatch --
 
     @Suppress("UNCHECKED_CAST")
     private fun dispatchDirect(event: Event) {
-        val errors = mutableListOf<Throwable>()
+        val classSnapshot: List<Class<*>>
+        val lambdaSnapshot: List<LambdaEntry<*>>
+        val globalSnapshot: List<(Event) -> Unit>
 
-        // Dispatch class-based listeners (with hierarchy walk)
-        for (listenerClass in collectEntries(classListeners, event::class.java)) {
+        synchronized(lock) {
+            classSnapshot = collectEntries(classListeners, event.javaClass)
+            lambdaSnapshot = collectEntries(lambdaListeners, event.javaClass)
+            globalSnapshot = if (globalListeners.isEmpty()) emptyList() else globalListeners.toList()
+        }
+
+        var errors: MutableList<Throwable>? = null
+
+        for (listenerClass in classSnapshot) {
             try {
-                val listener = resolver.resolve(listenerClass) as Listener<Event>
-                listener.handle(event)
+                val raw = resolver.resolve(listenerClass)
+                require(raw is Listener<*>) {
+                    "Resolver returned ${raw::class.java.name} for ${listenerClass.name}, expected Listener"
+                }
+                (raw as Listener<Event>).handle(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        // Dispatch lambda listeners (with hierarchy walk)
-        for (entry in collectEntries(lambdaListeners, event::class.java)) {
+        for (entry in lambdaSnapshot) {
             try {
                 (entry as LambdaEntry<Event>).handler(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        // Dispatch global listeners
-        for (handler in globalListeners.toList()) {
+        for (handler in globalSnapshot) {
             try {
                 handler(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        if (errors.isNotEmpty()) {
-            val error = if (errors.size == 1) errors[0] else CompositeEventException(errors)
-            onError(error)
-        }
+        errors?.let { onError(it.toSingleOrComposite()) }
     }
-
-    // -- Hierarchy walk (generic, works for both registries) --
-
-    private fun <V> collectEntries(registry: Map<out Class<out Event>, Collection<V>>, type: Class<*>): List<V> {
-        val result = mutableListOf<V>()
-        val visited = mutableSetOf<Class<*>>()
-        collectRecursive(registry, type, result, visited)
-        return result
-    }
-
-    private fun <V> collectRecursive(
-        registry: Map<out Class<out Event>, Collection<V>>,
-        type: Class<*>,
-        result: MutableList<V>,
-        visited: MutableSet<Class<*>>,
-    ) {
-        if (!visited.add(type)) return
-        registry[type]?.let { result.addAll(it) }
-        for (iface in type.interfaces) {
-            collectRecursive(registry, iface, result, visited)
-        }
-        type.superclass?.let { superclass ->
-            if (superclass != Any::class.java) {
-                collectRecursive(registry, superclass, result, visited)
-            }
-        }
-    }
-
-    // -- Internal types --
 
     private class LambdaEntry<E>(val handler: (E) -> Unit)
 }

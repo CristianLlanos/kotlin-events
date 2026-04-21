@@ -19,5 +19,6 @@ import com.cristianllanos.events.Event
  * @param T the event type this listener handles
  */
 interface SuspendingListener<T : Event> {
+    /** Called when an event of type [T] is emitted. */
     suspend fun handle(event: T)
 }

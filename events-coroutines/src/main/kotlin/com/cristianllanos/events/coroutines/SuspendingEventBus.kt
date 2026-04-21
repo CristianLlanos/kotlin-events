@@ -14,6 +14,9 @@ interface SuspendingEventBus : SuspendingEmitter, SuspendingSubscriber, Inspecto
 /**
  * Creates a [SuspendingEventBus] that resolves class-registered listeners from [resolver].
  *
+ * The returned bus is thread-safe: subscribe, unsubscribe, emit, and clear can be called
+ * concurrently from different coroutines or threads.
+ *
  * When a listener throws, remaining listeners still execute. Errors are collected and
  * passed to [onError] — by default, the exception is rethrown (single errors unwrapped,
  * multiple errors wrapped in [CompositeEventException][com.cristianllanos.events.CompositeEventException]).
@@ -28,5 +31,5 @@ interface SuspendingEventBus : SuspendingEmitter, SuspendingSubscriber, Inspecto
  */
 fun SuspendingEventBus(
     resolver: Resolver,
-    onError: (Throwable) -> Unit = { throw it },
+    onError: suspend (Throwable) -> Unit = { throw it },
 ): SuspendingEventBus = SuspendingEventDispatcher(resolver, onError)

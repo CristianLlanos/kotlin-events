@@ -1,17 +1,20 @@
 package com.cristianllanos.events.coroutines
 
 import com.cristianllanos.container.Resolver
-import com.cristianllanos.events.CompositeEventException
 import com.cristianllanos.events.Event
 import com.cristianllanos.events.Listener
 import com.cristianllanos.events.Subscription
+import com.cristianllanos.events.collectEntries
+import com.cristianllanos.events.toSingleOrComposite
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.reflect.KClass
 
 internal class SuspendingEventDispatcher(
     private val resolver: Resolver,
-    private val onError: (Throwable) -> Unit = { throw it },
+    private val onError: suspend (Throwable) -> Unit = { throw it },
 ) : SuspendingEventBus {
 
+    private val lock = Any()
     private val classListeners = mutableMapOf<Class<out Event>, LinkedHashSet<Class<*>>>()
     private val suspendingClassListeners = mutableMapOf<Class<out Event>, LinkedHashSet<Class<*>>>()
     private val lambdaListeners = mutableMapOf<Class<out Event>, MutableList<LambdaEntry<*>>>()
@@ -21,50 +24,61 @@ internal class SuspendingEventDispatcher(
 
     @Suppress("UNCHECKED_CAST")
     override suspend fun <T : Event> emit(event: T) {
-        val errors = mutableListOf<Throwable>()
+        val classSnapshot: List<Class<*>>
+        val suspendingSnapshot: List<Class<*>>
+        val lambdaSnapshot: List<LambdaEntry<*>>
+        val globalSnapshot: List<suspend (Event) -> Unit>
 
-        // 1. Plain Listener class registrations (with hierarchy walk)
-        for (listenerClass in collectEntries(classListeners, event::class.java)) {
+        synchronized(lock) {
+            classSnapshot = collectEntries(classListeners, event.javaClass)
+            suspendingSnapshot = collectEntries(suspendingClassListeners, event.javaClass)
+            lambdaSnapshot = collectEntries(lambdaListeners, event.javaClass)
+            globalSnapshot = if (globalListeners.isEmpty()) emptyList() else globalListeners.toList()
+        }
+
+        var errors: MutableList<Throwable>? = null
+
+        for (listenerClass in classSnapshot) {
             try {
-                val listener = resolver.resolve(listenerClass) as Listener<T>
-                listener.handle(event)
+                val raw = resolver.resolve(listenerClass)
+                require(raw is Listener<*>) {
+                    "Resolver returned ${raw::class.java.name} for ${listenerClass.name}, expected Listener"
+                }
+                (raw as Listener<T>).handle(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        // 2. SuspendingListener class registrations (with hierarchy walk)
-        for (listenerClass in collectEntries(suspendingClassListeners, event::class.java)) {
+        for (listenerClass in suspendingSnapshot) {
             try {
-                val listener = resolver.resolve(listenerClass) as SuspendingListener<T>
-                listener.handle(event)
+                val raw = resolver.resolve(listenerClass)
+                require(raw is SuspendingListener<*>) {
+                    "Resolver returned ${raw::class.java.name} for ${listenerClass.name}, expected SuspendingListener"
+                }
+                (raw as SuspendingListener<T>).handle(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        // 3. Lambda registrations (with hierarchy walk)
-        for (entry in collectEntries(lambdaListeners, event::class.java)) {
+        for (entry in lambdaSnapshot) {
             try {
                 (entry as LambdaEntry<Event>).handler(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        // 4. Global listeners
-        for (handler in globalListeners.toList()) {
+        for (handler in globalSnapshot) {
             try {
                 handler(event)
             } catch (e: Throwable) {
-                errors.add(e)
+                (errors ?: mutableListOf<Throwable>().also { errors = it }).add(e)
             }
         }
 
-        if (errors.isNotEmpty()) {
-            val error = if (errors.size == 1) errors[0] else CompositeEventException(errors)
-            onError(error)
-        }
+        errors?.let { onError(it.toSingleOrComposite()) }
     }
 
     override suspend fun emit(first: Event, vararg rest: Event) {
@@ -75,57 +89,76 @@ internal class SuspendingEventDispatcher(
     // -- Plain Listener subscription --
 
     override fun <E : Event, L : Listener<E>> subscribe(event: Class<E>, listener: Class<L>): SuspendingSubscriber {
-        classListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        synchronized(lock) {
+            classListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        }
         return this
     }
 
     override fun <E : Event> subscribe(event: Class<E>, vararg listeners: KClass<out Listener<E>>): SuspendingSubscriber {
-        val set = classListeners.computeIfAbsent(event) { linkedSetOf() }
-        listeners.forEach { set.add(it.java) }
+        synchronized(lock) {
+            val set = classListeners.computeIfAbsent(event) { linkedSetOf() }
+            listeners.forEach { set.add(it.java) }
+        }
         return this
     }
 
     override fun <E : Event, L : Listener<E>> unsubscribe(event: Class<E>, listener: Class<L>): SuspendingSubscriber {
-        classListeners[event]?.remove(listener)
+        synchronized(lock) { classListeners[event]?.remove(listener) }
         return this
     }
 
     // -- SuspendingListener subscription --
 
     override fun <E : Event, L : SuspendingListener<E>> subscribeSuspending(event: Class<E>, listener: Class<L>): SuspendingSubscriber {
-        suspendingClassListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        synchronized(lock) {
+            suspendingClassListeners.computeIfAbsent(event) { linkedSetOf() }.add(listener)
+        }
         return this
     }
 
     override fun <E : Event> subscribeSuspending(event: Class<E>, vararg listeners: KClass<out SuspendingListener<E>>): SuspendingSubscriber {
-        val set = suspendingClassListeners.computeIfAbsent(event) { linkedSetOf() }
-        listeners.forEach { set.add(it.java) }
+        synchronized(lock) {
+            val set = suspendingClassListeners.computeIfAbsent(event) { linkedSetOf() }
+            listeners.forEach { set.add(it.java) }
+        }
         return this
     }
 
     override fun <E : Event, L : SuspendingListener<E>> unsubscribeSuspending(event: Class<E>, listener: Class<L>): SuspendingSubscriber {
-        suspendingClassListeners[event]?.remove(listener)
+        synchronized(lock) { suspendingClassListeners[event]?.remove(listener) }
         return this
     }
 
     // -- Lambda subscription --
 
-    @Suppress("UNCHECKED_CAST")
     override fun <E : Event> on(event: Class<E>, handler: suspend (E) -> Unit): Subscription {
-        val entry = LambdaEntry(handler as suspend (Any) -> Unit)
-        lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
-        return Subscription { lambdaListeners[event]?.remove(entry) }
+        val entry = LambdaEntry(handler)
+        synchronized(lock) {
+            lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
+        }
+        return Subscription {
+            synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+        }
     }
 
-    @Suppress("UNCHECKED_CAST")
     override fun <E : Event> once(event: Class<E>, handler: suspend (E) -> Unit): Subscription {
-        lateinit var entry: LambdaEntry<Any>
-        entry = LambdaEntry { e ->
-            lambdaListeners[event]?.remove(entry)
-            (handler as suspend (Any) -> Unit)(e)
+        val fired = AtomicBoolean(false)
+        lateinit var entry: LambdaEntry<E>
+        entry = LambdaEntry<E> { e ->
+            if (fired.compareAndSet(false, true)) {
+                synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+                handler(e)
+            }
         }
-        lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
-        return Subscription { lambdaListeners[event]?.remove(entry) }
+        synchronized(lock) {
+            lambdaListeners.computeIfAbsent(event) { mutableListOf() }.add(entry)
+        }
+        return Subscription {
+            if (fired.compareAndSet(false, true)) {
+                synchronized(lock) { lambdaListeners[event]?.remove(entry) }
+            }
+        }
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -147,20 +180,24 @@ internal class SuspendingEventDispatcher(
     }
 
     override fun onAny(handler: suspend (Event) -> Unit): Subscription {
-        globalListeners.add(handler)
-        return Subscription { globalListeners.remove(handler) }
+        synchronized(lock) { globalListeners.add(handler) }
+        return Subscription {
+            synchronized(lock) { globalListeners.remove(handler) }
+        }
     }
 
     override fun clear() {
-        classListeners.clear()
-        suspendingClassListeners.clear()
-        lambdaListeners.clear()
-        globalListeners.clear()
+        synchronized(lock) {
+            classListeners.clear()
+            suspendingClassListeners.clear()
+            lambdaListeners.clear()
+            globalListeners.clear()
+        }
     }
 
-    // -- Inspector (walks hierarchy for consistency with emit) --
+    // -- Inspector --
 
-    override fun <E : Event> hasListeners(event: Class<E>): Boolean {
+    override fun <E : Event> hasListeners(event: Class<E>): Boolean = synchronized(lock) {
         if (globalListeners.isNotEmpty()) return true
         if (collectEntries(classListeners, event).isNotEmpty()) return true
         if (collectEntries(suspendingClassListeners, event).isNotEmpty()) return true
@@ -168,38 +205,11 @@ internal class SuspendingEventDispatcher(
         return false
     }
 
-    override fun <E : Event> listenerCount(event: Class<E>): Int {
+    override fun <E : Event> listenerCount(event: Class<E>): Int = synchronized(lock) {
         val classCount = collectEntries(classListeners, event).size
         val suspendingCount = collectEntries(suspendingClassListeners, event).size
         val lambdaCount = collectEntries(lambdaListeners, event).size
-        return classCount + suspendingCount + lambdaCount + globalListeners.size
-    }
-
-    // -- Hierarchy walk (generic) --
-
-    private fun <V> collectEntries(registry: Map<out Class<out Event>, Collection<V>>, type: Class<*>): List<V> {
-        val result = mutableListOf<V>()
-        val visited = mutableSetOf<Class<*>>()
-        collectRecursive(registry, type, result, visited)
-        return result
-    }
-
-    private fun <V> collectRecursive(
-        registry: Map<out Class<out Event>, Collection<V>>,
-        type: Class<*>,
-        result: MutableList<V>,
-        visited: MutableSet<Class<*>>,
-    ) {
-        if (!visited.add(type)) return
-        registry[type]?.let { result.addAll(it) }
-        for (iface in type.interfaces) {
-            collectRecursive(registry, iface, result, visited)
-        }
-        type.superclass?.let { superclass ->
-            if (superclass != Any::class.java) {
-                collectRecursive(registry, superclass, result, visited)
-            }
-        }
+        classCount + suspendingCount + lambdaCount + globalListeners.size
     }
 
     private class LambdaEntry<E>(val handler: suspend (E) -> Unit)

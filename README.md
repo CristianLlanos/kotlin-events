@@ -9,13 +9,26 @@ A lightweight, type-safe event bus for Kotlin with dependency-injected listeners
 | `events-core` | `com.cristianllanos:events:1.0.0` | Event bus with DI-resolved listeners |
 | `events-coroutines` | `com.cristianllanos:events-coroutines:1.0.0` | Suspending listeners and emit |
 
+**`events-core`** is a synchronous event bus with no coroutines dependency. Listeners implement `Listener<T>` with a regular `fun handle(event)`, and `emit()` returns after all listeners have run. Use this when your listeners do in-memory work like updating state, logging, or calling other synchronous services.
+
+**`events-coroutines`** adds a suspending event bus on top. Listeners can implement `SuspendingListener<T>` with `suspend fun handle(event)`, and `emit()` is a suspend function that awaits all handlers. Use this when your listeners need to call suspend functions — database writes, HTTP requests, channel sends, or anything that would otherwise require `runBlocking`. It also accepts plain `Listener` registrations, so you can mix sync and async handlers on the same bus.
+
+**Which one should I use?**
+
+- If your project doesn't use coroutines, or your listeners only do synchronous work → **`events-core`** only.
+- If your listeners need to call suspend functions → **`events-coroutines`** (it includes `events-core` as a transitive dependency, so you only need one line).
+- If you're unsure → start with `events-core`. You can add `events-coroutines` later without changing your existing listeners or events.
+
 ## Installation
 
 ```kotlin
+// Synchronous only
 dependencies {
     implementation("com.cristianllanos:events:1.0.0")
+}
 
-    // Optional: coroutines support
+// With coroutines support (pulls in events-core automatically)
+dependencies {
     implementation("com.cristianllanos:events-coroutines:1.0.0")
 }
 ```
@@ -127,8 +140,16 @@ bus.listenerCount<UserCreated>()  // number of registered listeners
 
 When a listener throws, remaining listeners still execute. Errors are collected and rethrown after all listeners have run. A single error is thrown directly; multiple errors are wrapped in `CompositeEventException`.
 
+Provide a custom error handler to change this behavior:
+
 ```kotlin
 val bus = EventBus(container, onError = { e -> logger.error("Dispatch failed", e) })
+```
+
+In the coroutines module, `onError` is a suspend function, so you can perform async work like writing to a database or sending to a channel:
+
+```kotlin
+val bus = SuspendingEventBus(container, onError = { e -> errorChannel.send(e) })
 ```
 
 ## Event hierarchy
@@ -143,11 +164,18 @@ bus.onAny { event -> /* receives all events */ }
 bus.on<DomainEvent> { event -> /* receives UserCreated too */ }
 ```
 
+## Thread safety
+
+Both `EventBus` and `SuspendingEventBus` are thread-safe. You can subscribe, unsubscribe, emit, and clear concurrently from different threads or coroutines.
+
+Listener dispatch uses snapshot-based iteration: the listener list is copied under a lock before dispatch begins, so mutations during emit never cause `ConcurrentModificationException`. One-shot listeners (`once()`) are guaranteed to fire at most once, even under concurrent or reentrant emit.
+
 ## Unsubscribe and clear
 
 ```kotlin
 bus.unsubscribe<UserCreated, SendWelcomeEmail>()
-bus.clear()
+
+bus.clear() // removes all listeners and middleware
 ```
 
 ## Interface segregation
@@ -180,7 +208,27 @@ EventServiceProvider().register(container)
 
 ## Coroutines
 
-The `events-coroutines` module provides suspending counterparts for the core interfaces:
+The `events-coroutines` module mirrors the core API with suspending counterparts:
+
+| Core | Coroutines |
+|------|------------|
+| `Listener<T>` | `SuspendingListener<T>` |
+| `Emitter` | `SuspendingEmitter` |
+| `Subscriber` | `SuspendingSubscriber` |
+| `EventBus` | `SuspendingEventBus` |
+| `EventServiceProvider` | `SuspendingEventServiceProvider` |
+
+Suspending listeners can call any suspend function in their handler:
+
+```kotlin
+class AsyncWelcomeEmail(private val mailer: SuspendingMailer) : SuspendingListener<UserCreated> {
+    override suspend fun handle(event: UserCreated) {
+        mailer.send("Welcome, ${event.name}!")
+    }
+}
+```
+
+Wire and emit from a coroutine scope:
 
 ```kotlin
 val bus = SuspendingEventBus(container)
@@ -191,17 +239,7 @@ bus.on<UserCreated> { event -> delay(100); println(event.name) }
 coroutineScope { bus.emit(UserCreated("Alice")) }
 ```
 
-Suspending listeners implement `SuspendingListener`:
-
-```kotlin
-class AsyncWelcomeEmail(private val mailer: SuspendingMailer) : SuspendingListener<UserCreated> {
-    override suspend fun handle(event: UserCreated) {
-        mailer.send("Welcome, ${event.name}!")
-    }
-}
-```
-
-A `SuspendingEventBus` accepts both `Listener` and `SuspendingListener` registrations.
+A `SuspendingEventBus` accepts both `Listener` and `SuspendingListener` registrations, so you can migrate incrementally — existing synchronous listeners work as-is alongside new suspending ones.
 
 ## License
 

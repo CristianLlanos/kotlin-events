@@ -15,6 +15,7 @@ package com.cristianllanos.events
  * ```
  */
 fun interface Middleware {
+    /** Intercepts the [event]. Call [next] to continue dispatch or omit it to short-circuit. */
     fun handle(event: Event, next: (Event) -> Unit)
 }
 

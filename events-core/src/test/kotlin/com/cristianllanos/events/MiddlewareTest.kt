@@ -53,4 +53,34 @@ class MiddlewareTest {
 
         assertEquals(listOf("A-before", "B-before", "handler", "B-after", "A-after"), log)
     }
+
+    @Test
+    fun `clear removes middleware`() {
+        val bus = EventBus(FakeResolver())
+        val log = mutableListOf<String>()
+
+        bus.use { _, _ -> log.add("blocked") }
+        bus.clear()
+        bus.on<UserCreated> { log.add("handler") }
+        bus.emit(UserCreated("Alice"))
+
+        assertEquals(listOf("handler"), log)
+    }
+
+    @Test
+    fun `middleware added after emit is picked up`() {
+        val bus = EventBus(FakeResolver())
+        val log = mutableListOf<String>()
+
+        bus.on<UserCreated> { log.add("handler") }
+        bus.emit(UserCreated("first"))
+
+        bus.use { event, next ->
+            log.add("middleware")
+            next(event)
+        }
+        bus.emit(UserCreated("second"))
+
+        assertEquals(listOf("handler", "middleware", "handler"), log)
+    }
 }

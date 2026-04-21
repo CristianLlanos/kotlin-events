@@ -2,24 +2,32 @@
 
 A lightweight, type-safe event bus for Kotlin with dependency-injected listeners.
 
-Coordinates: `com.cristianllanos:events`
+Coordinates: `com.cristianllanos:events` (core), `com.cristianllanos:events-coroutines` (coroutines)
 
 ## Core concepts
 
-- **Event**: Base class. Extend it to define domain events (`class UserCreated(val name: String) : Event()`).
-- **Listener<T>**: Interface with a single `handle(event: T)` method. Listeners are resolved from the DI container on each emit, so they support constructor injection.
-- **Emitter**: Fires events to registered listeners via `emit(event)`.
-- **Subscriber**: Registers/unregisters listener classes for event types. Supports method chaining.
-- **EventBus**: Combines Emitter + Subscriber. Created via `EventBus(resolver)` factory function.
+- **Event**: Interface. Implement it to define domain events (`data class UserCreated(val name: String) : Event`).
+- **Listener<T>**: Interface with `handle(event: T)`. Listeners are resolved from the DI container on each emit.
+- **Emitter**: Fires events via `emit(event)`. Supports vararg emit for multiple events.
+- **Subscriber**: Registers listeners. Supports class-based (`subscribe`), lambda (`on`), one-shot (`once`), catch-all (`onAny`), middleware (`use`), and DSL (`register`) registration.
+- **Inspector**: Introspection via `hasListeners<E>()` and `listenerCount<E>()`.
+- **EventBus**: Combines Emitter + Subscriber + Inspector. Created via `EventBus(resolver)` factory.
+- **Middleware**: Intercepts dispatch pipeline. Call `next(event)` to continue or omit to short-circuit.
+- **Subscription**: Handle returned by lambda registrations. Call `cancel()` to remove.
 - **EventServiceProvider**: Registers EventBus, Emitter, and Subscriber as singletons in a kotlin-container `Container`.
+
+## Thread safety
+
+EventBus and SuspendingEventBus are thread-safe. All mutable state is guarded by synchronized blocks. Dispatch uses snapshot-based iteration so concurrent subscribe/unsubscribe/clear during emit is safe. One-shot listeners (`once()`) are guaranteed to fire at most once, even under concurrent or reentrant emit.
 
 ## Usage patterns
 
-### Standalone (without DI container)
+### Standalone
 
 ```kotlin
 val bus = EventBus(resolver)
 bus.subscribe<UserCreated, SendWelcomeEmail>()
+bus.on<UserCreated> { println(it.name) }
 bus.emit(UserCreated("Alice"))
 ```
 
@@ -28,37 +36,73 @@ bus.emit(UserCreated("Alice"))
 ```kotlin
 val container = Container()
 EventServiceProvider().register(container)
-
-// Inject only what you need
 val emitter = container.resolve<Emitter>()
 emitter.emit(UserCreated("Alice"))
 ```
 
-### Multiple listeners
+### Lambda and one-shot listeners
 
 ```kotlin
-subscriber.subscribe<UserCreated>(
-    SendWelcomeEmail::class,
-    LogNewUser::class,
-    UpdateAnalytics::class
-)
+val sub = bus.on<UserCreated> { println(it.name) }
+sub.cancel()
+
+bus.once<UserCreated> { println("first only: ${it.name}") }
+bus.onAny { println("all events: $it") }
 ```
 
-### Interface segregation
+### Middleware
 
-Prefer injecting `Emitter` or `Subscriber` individually over `EventBus` for better separation of concerns.
+```kotlin
+bus.use { event, next ->
+    val start = System.nanoTime()
+    next(event)
+    println("${event::class.simpleName} in ${System.nanoTime() - start}ns")
+}
+```
+
+### Registration DSL
+
+```kotlin
+bus.register {
+    UserCreated::class mappedTo listOf(SendWelcomeEmail::class, LogNewUser::class)
+    OrderPlaced::class mappedTo listOf(NotifyWarehouse::class)
+}
+```
+
+### Error handling
+
+```kotlin
+val bus = EventBus(resolver, onError = { e -> logger.error("dispatch failed", e) })
+```
+
+In the coroutines module, `onError` is a suspend function:
+
+```kotlin
+val bus = SuspendingEventBus(resolver, onError = { e -> errorChannel.send(e) })
+```
+
+### Coroutines (events-coroutines module)
+
+```kotlin
+val bus = SuspendingEventBus(container)
+bus.subscribeSuspending<UserCreated, AsyncWelcomeEmail>()
+bus.on<UserCreated> { delay(100); println(it.name) }
+coroutineScope { bus.emit(UserCreated("Alice")) }
+```
 
 ## API reference
 
 | Type | Role |
 |------|------|
-| `Event` | Base class for all events |
-| `Listener<T : Event>` | Handles events of type T |
-| `Emitter` | `emit(event)` |
-| `Subscriber` | `subscribe(event, listener)`, `unsubscribe(event, listener)`, `clear()` |
-| `EventBus` | Combines Emitter + Subscriber |
-| `EventServiceProvider` | Registers singletons in a Container |
-
-Reified extension functions on `Subscriber` avoid `.java` class references:
-- `subscribe<E, L>()` / `subscribe<E>(vararg listeners)`
-- `unsubscribe<E, L>()`
+| `Event` | Interface for all events |
+| `Listener<T>` | Synchronous handler |
+| `SuspendingListener<T>` | Suspending handler (coroutines module) |
+| `Emitter` | `emit(event)`, `emit(first, vararg rest)` |
+| `Subscriber` | `subscribe`, `unsubscribe`, `on`, `once`, `onAny`, `use`, `register`, `clear` |
+| `Inspector` | `hasListeners<E>()`, `listenerCount<E>()` |
+| `EventBus` | Emitter + Subscriber + Inspector |
+| `SuspendingEventBus` | SuspendingEmitter + SuspendingSubscriber + Inspector |
+| `Middleware` | `handle(event, next)` |
+| `Subscription` | `cancel()` |
+| `CompositeEventException` | Wraps multiple listener errors |
+| `EventServiceProvider` | Registers singletons in Container |

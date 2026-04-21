@@ -16,3 +16,6 @@ class CompositeEventException(
         errors.forEach { addSuppressed(it) }
     }
 }
+
+fun List<Throwable>.toSingleOrComposite(): Throwable =
+    if (size == 1) this[0] else CompositeEventException(this)

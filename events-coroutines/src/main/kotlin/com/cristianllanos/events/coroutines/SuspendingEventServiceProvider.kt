@@ -20,6 +20,7 @@ import com.cristianllanos.container.singleton
  * ```
  */
 class SuspendingEventServiceProvider {
+    /** Registers [SuspendingEventBus], [SuspendingEmitter], and [SuspendingSubscriber] singletons in the [container]. */
     fun register(container: Container) {
         container.singleton<SuspendingEventBus> { SuspendingEventBus(this) }
         container.singleton<SuspendingEmitter> { resolve<SuspendingEventBus>() }

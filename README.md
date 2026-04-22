@@ -1,23 +1,9 @@
 # kotlin-events
 
-A lightweight, type-safe event bus for Kotlin with dependency-injected listeners.
+A lightweight, type-safe event bus for Kotlin with DI-resolved listeners, middleware, and coroutines support.
 
-## Modules
-
-| Module | Artifact | Description |
-|--------|----------|-------------|
-| `events-core` | `com.cristianllanos:events:1.0.0` | Event bus with DI-resolved listeners |
-| `events-coroutines` | `com.cristianllanos:events-coroutines:1.0.0` | Suspending listeners and emit |
-
-**`events-core`** is a synchronous event bus with no coroutines dependency. Listeners implement `Listener<T>` with a regular `fun handle(event)`, and `emit()` returns after all listeners have run. Use this when your listeners do in-memory work like updating state, logging, or calling other synchronous services.
-
-**`events-coroutines`** adds a suspending event bus on top. Listeners can implement `SuspendingListener<T>` with `suspend fun handle(event)`, and `emit()` is a suspend function that awaits all handlers. Use this when your listeners need to call suspend functions — database writes, HTTP requests, channel sends, or anything that would otherwise require `runBlocking`. It also accepts plain `Listener` registrations, so you can mix sync and async handlers on the same bus.
-
-**Which one should I use?**
-
-- If your project doesn't use coroutines, or your listeners only do synchronous work → **`events-core`** only.
-- If your listeners need to call suspend functions → **`events-coroutines`** (it includes `events-core` as a transitive dependency, so you only need one line).
-- If you're unsure → start with `events-core`. You can add `events-coroutines` later without changing your existing listeners or events.
+[![Maven Central](https://img.shields.io/maven-central/v/com.cristianllanos/events)](https://central.sonatype.com/artifact/com.cristianllanos/events)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 ## Installation
 
@@ -33,20 +19,7 @@ dependencies {
 }
 ```
 
-Both pull in [`kotlin-container`](https://github.com/CristianLlanos/kotlin-container) as a transitive dependency.
-
-## Quick start
-
-```kotlin
-val container = Container()
-EventServiceProvider().register(container)
-
-val bus = container.resolve<EventBus>()
-bus.subscribe<UserCreated, SendWelcomeEmail>()
-bus.emit(UserCreated("Alice"))
-```
-
-Define events as data classes and listeners with injected dependencies:
+## Quick Start
 
 ```kotlin
 data class UserCreated(val name: String) : Event
@@ -56,190 +29,24 @@ class SendWelcomeEmail(private val mailer: Mailer) : Listener<UserCreated> {
         mailer.send("Welcome, ${event.name}!")
     }
 }
-```
 
-Listeners are resolved from the container on each emit, so their dependencies are auto-injected.
-
-## Lambda listeners
-
-Register inline handlers without creating a class:
-
-```kotlin
-val subscription = bus.on<UserCreated> { event ->
-    println("New user: ${event.name}")
-}
-
-subscription.cancel() // removes the listener
-```
-
-## One-shot listeners
-
-Listeners that fire once and auto-unsubscribe:
-
-```kotlin
-bus.once<UserCreated> { event -> println("First user: ${event.name}") }
-
-bus.once<UserCreated, SendWelcomeEmail>() // class-based one-shot
-```
-
-## Catch-all listener
-
-Receive every event regardless of type:
-
-```kotlin
-bus.onAny { event -> println("Event: $event") }
-```
-
-## Multiple listeners
-
-```kotlin
-bus.subscribe<UserCreated>(
-    SendWelcomeEmail::class,
-    AuditLogListener::class,
-    AnalyticsListener::class,
-)
-```
-
-## Registration DSL
-
-Bulk-register event-listener mappings:
-
-```kotlin
-bus.register {
-    UserCreated::class mappedTo listOf(SendWelcomeEmail::class, LogNewUser::class)
-    OrderPlaced::class mappedTo listOf(NotifyWarehouse::class)
-}
-```
-
-## Middleware
-
-Intercept event dispatch for cross-cutting concerns:
-
-```kotlin
-bus.use { event, next ->
-    val start = System.nanoTime()
-    next(event) // call next to continue the pipeline
-    println("Dispatched ${event::class.simpleName} in ${System.nanoTime() - start}ns")
-}
-```
-
-Omit the `next` call to short-circuit dispatch.
-
-## Inspector
-
-Query the event bus state:
-
-```kotlin
-val bus = container.resolve<EventBus>()
-
-bus.hasListeners<UserCreated>()   // true/false
-bus.listenerCount<UserCreated>()  // number of registered listeners
-```
-
-## Error resilience
-
-When a listener throws, remaining listeners still execute. Errors are collected and rethrown after all listeners have run. A single error is thrown directly; multiple errors are wrapped in `CompositeEventException`.
-
-Provide a custom error handler to change this behavior:
-
-```kotlin
-val bus = EventBus(container, onError = { e -> logger.error("Dispatch failed", e) })
-```
-
-In the coroutines module, `onError` is a suspend function, so you can perform async work like writing to a database or sending to a channel:
-
-```kotlin
-val bus = SuspendingEventBus(container, onError = { e -> errorChannel.send(e) })
-```
-
-## Event hierarchy
-
-Listeners registered for a parent event type are also invoked when a subtype is emitted:
-
-```kotlin
-interface DomainEvent : Event
-data class UserCreated(val name: String) : DomainEvent
-
-bus.onAny { event -> /* receives all events */ }
-bus.on<DomainEvent> { event -> /* receives UserCreated too */ }
-```
-
-## Thread safety
-
-Both `EventBus` and `SuspendingEventBus` are thread-safe. You can subscribe, unsubscribe, emit, and clear concurrently from different threads or coroutines.
-
-Listener dispatch uses snapshot-based iteration: the listener list is copied under a lock before dispatch begins, so mutations during emit never cause `ConcurrentModificationException`. One-shot listeners (`once()`) are guaranteed to fire at most once, even under concurrent or reentrant emit.
-
-## Unsubscribe and clear
-
-```kotlin
-bus.unsubscribe<UserCreated, SendWelcomeEmail>()
-
-bus.clear() // removes all listeners and middleware
-```
-
-## Interface segregation
-
-```kotlin
-interface Emitter     // emit()
-interface Subscriber  // subscribe(), unsubscribe(), on(), once(), use(), register(), clear()
-interface Inspector   // hasListeners(), listenerCount()
-interface EventBus : Emitter, Subscriber, Inspector
-```
-
-Inject only what each component needs:
-
-```kotlin
-class OrderService(private val events: Emitter) {
-    fun placeOrder(order: Order) {
-        events.emit(OrderPlaced(order.id))
-    }
-}
-```
-
-## Service provider
-
-`EventServiceProvider` registers `EventBus`, `Emitter`, and `Subscriber` as singletons:
-
-```kotlin
 val container = Container()
 EventServiceProvider().register(container)
+
+val bus = container.resolve<EventBus>()
+bus.subscribe<UserCreated, SendWelcomeEmail>()
+bus.emit(UserCreated("Alice"))
 ```
 
-## Coroutines
+## Documentation
 
-The `events-coroutines` module mirrors the core API with suspending counterparts:
-
-| Core | Coroutines |
-|------|------------|
-| `Listener<T>` | `SuspendingListener<T>` |
-| `Emitter` | `SuspendingEmitter` |
-| `Subscriber` | `SuspendingSubscriber` |
-| `EventBus` | `SuspendingEventBus` |
-| `EventServiceProvider` | `SuspendingEventServiceProvider` |
-
-Suspending listeners can call any suspend function in their handler:
-
-```kotlin
-class AsyncWelcomeEmail(private val mailer: SuspendingMailer) : SuspendingListener<UserCreated> {
-    override suspend fun handle(event: UserCreated) {
-        mailer.send("Welcome, ${event.name}!")
-    }
-}
-```
-
-Wire and emit from a coroutine scope:
-
-```kotlin
-val bus = SuspendingEventBus(container)
-
-bus.subscribeSuspending<UserCreated, AsyncWelcomeEmail>()
-bus.on<UserCreated> { event -> delay(100); println(event.name) }
-
-coroutineScope { bus.emit(UserCreated("Alice")) }
-```
-
-A `SuspendingEventBus` accepts both `Listener` and `SuspendingListener` registrations, so you can migrate incrementally — existing synchronous listeners work as-is alongside new suspending ones.
+- [Getting Started](https://cristianllanos.com/projects/kotlin-events/guide/) — Installation, events and listeners, DI wiring
+- [Listeners](https://cristianllanos.com/projects/kotlin-events/listeners/) — Lambda handlers, one-shot, catch-all, registration DSL
+- [Middleware & Errors](https://cristianllanos.com/projects/kotlin-events/middleware/) — Middleware pipeline, error resilience, inspector, event hierarchy
+- [Coroutines](https://cristianllanos.com/projects/kotlin-events/coroutines/) — Suspending listeners and emit, mixed handlers, migration
+- [Advanced](https://cristianllanos.com/projects/kotlin-events/advanced/) — Thread safety, interface segregation, once guarantees
+- [API Reference](https://cristianllanos.com/projects/kotlin-events/api/) — Complete public API
+- [Changelog](https://cristianllanos.com/projects/kotlin-events/changelog/) — Release history
 
 ## License
 

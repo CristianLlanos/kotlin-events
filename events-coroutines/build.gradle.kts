@@ -34,7 +34,7 @@ mavenPublishing {
     pom {
         name.set("Kotlin Events Coroutines")
         description.set("Coroutines extension for kotlin-events: suspending listeners and emit")
-        url.set("https://github.com/CristianLlanos/kotlin-events")
+        url.set("https://cristianllanos.com/projects/kotlin-events/")
 
         licenses {
             license {

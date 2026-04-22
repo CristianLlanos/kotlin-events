@@ -31,7 +31,7 @@ mavenPublishing {
     pom {
         name.set("Kotlin Events")
         description.set("A lightweight event bus for Kotlin with dependency-injected listeners")
-        url.set("https://github.com/CristianLlanos/kotlin-events")
+        url.set("https://cristianllanos.com/projects/kotlin-events/")
 
         licenses {
             license {
